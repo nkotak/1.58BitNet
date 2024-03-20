@@ -11,10 +11,12 @@ I've been testing different parameter models against the implementation and this
 | Parameter Size  | Model Size (MB/GB) |
 | ------------- | ------------- |
 | 350M  | 72 MB  |
-| 750M  | 753 MB  |
-| 1B  | - MB  |
-| 3B  | - MB  |
+| 750M  | 153 MB  |
+| 1B  | 203 MB  |
+| 3B  | 607 MB  |
+| 7B  | - MB  |
 | 14B  | - GB  |
+| 24B  | - GB  |
 | 34B  | - GB  |
 | 70B  | - GB  |
 | 100B  | - GB  |
