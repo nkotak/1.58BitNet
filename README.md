@@ -12,14 +12,14 @@ I've been testing different parameter models against the implementation and this
 | ------------- | ------------- |
 | 350M  | 72 MB  |
 | 750M  | 753 MB  |
-| 1B  | 753 MB  |
-| 3B  | 753 MB  |
-| 14B  | 753 MB  |
-| 34B  | 753 MB  |
-| 70B  | 753 MB  |
-| 100B  | 753 MB  |
-| 120B  | 753 MB  |
-| 300B  | 753 MB  |
+| 1B  | - MB  |
+| 3B  | - MB  |
+| 14B  | - GB  |
+| 34B  | - GB  |
+| 70B  | - GB  |
+| 100B  | - GB  |
+| 120B  | - GB  |
+| 300B  | - GB  |
 
 I was able to create these size models on my 96GB M2 Max Macbook Pro.
 Just an FYI these scripts are specifically created to work on MPS with a CPU fallback. I'm hoping I can get help to get it working through MLX once we've fixed the finetuning / training issues. 
