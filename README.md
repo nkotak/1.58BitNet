@@ -24,6 +24,8 @@ I've been testing different parameter models against the implementation and this
 I was able to create these size models on my 96GB M2 Max Macbook Pro.
 Just an FYI these scripts are specifically created to work on MPS with a CPU fallback. I'm hoping I can get help to get it working through MLX once we've fixed the finetuning / training issues. 
 
+I also think that this isnt completely optimized for memory management and theres probably opportunity for that. 
+
 ## Table of Contents
 
 - [Installation](#installation)
