@@ -6,6 +6,24 @@ This is my 1.58 BitNet implementation based on this paper: https://arxiv.org/abs
 Basically when you generate the model - the model is blank and you need to train it. This is where I'm having the biggest issues - I still cant seem to get the training to work properly. 
 I need help with this implementation. I've take this as far as I can with my knowledge but for some reason I cant get the training to work properly. 
 
+I've been testing different parameter models against the implementation and this is what I've observed:
+
+| Parameter Size  | Model Size (MB/GB) |
+| ------------- | ------------- |
+| 350M  | 72 MB  |
+| 750M  | 753 MB  |
+| 1B  | 753 MB  |
+| 3B  | 753 MB  |
+| 14B  | 753 MB  |
+| 34B  | 753 MB  |
+| 70B  | 753 MB  |
+| 100B  | 753 MB  |
+| 120B  | 753 MB  |
+| 300B  | 753 MB  |
+
+I was able to create these size models on my 96GB M2 Max Macbook Pro.
+Just an FYI these scripts are specifically created to work on MPS with a CPU fallback. I'm hoping I can get help to get it working through MLX once we've fixed the finetuning / training issues. 
+
 ## Table of Contents
 
 - [Installation](#installation)
