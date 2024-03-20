@@ -18,7 +18,6 @@ I need help with this implementation. I've take this as far as I can with my kno
 - [Evaluation](#evaluation)
 - [Saving and Loading Models](#saving-and-loading-models)
 - [Contributing](#contributing)
-- [License](#license)
 
 ## Installation
 Git clone the repo
