@@ -1,6 +1,6 @@
-# LLaMA Model Fine-Tuning with Ternary Quantization
+# 1.58 BitNet Ternary Model Implementation
 
-This project focuses on fine-tuning a pre-trained LLaMA model using ternary quantization techniques. The goal is to optimize the model's performance while reducing its memory footprint.
+This project focuses on creating and training a LLaMA model using ternary quantization techniques. The goal is to optimize the model's performance while reducing its memory footprint.
 This is my 1.58 BitNet implementation based on this paper: https://arxiv.org/abs/2402.17764
 
 Basically when you generate the model - the model is blank and you need to train it. This is where I'm having the biggest issues - I still cant seem to get the training to work properly. 
