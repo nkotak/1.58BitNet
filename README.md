@@ -106,7 +106,7 @@ The `evaluate` function in `trainingv2.py` evaluates the model on a validation s
 
 ## Saving and Loading Models
 
-The `save_pretrained` method in the `LlamaModel` class saves the fine-tuned model to the specified output directory. It quantizes the model's weights and saves them in the safetensors format. The `load_pretrained` method loads a pre-trained model from the specified model path.
+The model generated from `new-model-architecture-creation.py` will be saved in the same directory where you ran the script from. When running `trainingv2.py` you will be prompted to enter the path of that model. The output directory you specify in the training command will be where the finetuned model is saved. 
 
 ## Contributing
 
