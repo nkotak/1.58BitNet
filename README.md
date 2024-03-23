@@ -65,7 +65,7 @@ python trainingv2.py --dataset <dataset_path> --model_path <model_path> --batch_
 Sample training command:
 
 ```
-python trainingv2.py --dataset /Users/nk/AI/Datasets/codeDataset/data/train.jsonl --batch_size 8 --num_epochs 5000 --output_dir /Users/nk/Downloads/llama_750m_finetune_tritnet-v2 --iters 10000 --max_length 4096 --learning_rate 1e-4 --grad_accum_steps 10
+python trainingv2.py --dataset /Users/user/folder/Datasets/codeDataset/data/train.jsonl --batch_size 8 --num_epochs 5000 --output_dir /Users/user/Downloads/llama_750m_finetune_tritnet-v2 --iters 10000 --max_length 4096 --learning_rate 1e-4 --grad_accum_steps 10
 ```
 
 ## Dataset
