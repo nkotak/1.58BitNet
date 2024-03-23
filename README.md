@@ -62,12 +62,19 @@ python trainingv2.py --dataset <dataset_path> --model_path <model_path> --batch_
 - `max_sequence_length`: Maximum sequence length for input tokens.
 - `gradient_accumulation_steps`: Number of steps for gradient accumulation.
 
+Sample training command:
+
+```
+python trainingv2.py --dataset /Users/nk/AI/Datasets/codeDataset/data/train.jsonl --batch_size 8 --num_epochs 5000 --output_dir /Users/nk/Downloads/llama_750m_finetune_tritnet-v2 --iters 10000 --max_length 4096 --learning_rate 1e-4 --grad_accum_steps 10
+```
+
 ## Dataset
 
 The dataset should be in one of the following formats: txt, json, jsonl. The `preprocess_dataset` function in `trainingv2.py` handles the preprocessing of the dataset based on its format.
 Here is the format that the jsonl file should be formatted in :
 
 `{"text": "This is an example for the model."}`
+
 For example: 
 `{"text": "<s>[INST] Create an array of length 5 which contains all even numbers between 1 and 10. [/INST]arr = [2, 4, 6, 8, 10]</s>"}`
 
