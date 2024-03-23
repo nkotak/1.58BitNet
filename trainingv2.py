@@ -10,6 +10,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import argparse
 import numpy as np
+import math
 
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
@@ -141,18 +142,41 @@ def train(model, tokenizer, dataset, batch_size, num_epochs, learning_rate, iter
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model.to(device)
 
+    torch.autograd.set_detect_anomaly(True)
+
+    # Define the learning rate scheduler
+    def lr_scheduler(step):
+        if step < iters // 2:
+            return learning_rate
+        else:
+            return learning_rate * 0.1
+
+    # Define the weight decay scheduler
+    def wd_scheduler(step):
+        if step < iters // 2:
+            return 0.1
+        else:
+            return 0.0
+
     step = 0
     while step < iters:
         for batch_idx, batch in enumerate(tqdm(iterate_batches(dataset, tokenizer, batch_size, train=True, max_length=max_length), desc=f"Iteration {step // steps_per_eval + 1}")):
             batch = tuple(t.to(device) for t in batch)
             loss_value, ntoks = loss(model, *batch)
             loss_value = loss_value / grad_accum_steps
-            loss_value.backward()
+            loss_value.backward(retain_graph=True)
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+
+                # Update the learning rate and weight decay
+                lr = lr_scheduler(step)
+                wd = wd_scheduler(step)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
+                    param_group['weight_decay'] = wd
 
             if step % steps_per_report == 0:
                 print(f"Step {step}: Loss = {loss_value.item():.4f}")

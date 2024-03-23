@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from transformers import LlamaConfig, AutoTokenizer
-from quantization_utils import quantize_tensor, pack_quantized_tensor, unpack_quantized_tensor
+from quantization_utils import quantize_tensor, activation_quant, weight_quant, activation_norm_quant, gemm_lowbit_kernel_mps, kv_cache_quant, act_quant_8bit, act_quant_4bit, quantize_tensor_1_58bit
 from safetensors.torch import save_file, load_file
 import os
 import json
@@ -11,16 +11,23 @@ import numpy as np
 import time
 from custom_gradient_checkpointing import custom_checkpoint
 
+def RMSNorm(x, eps=1e-6):
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+
 class QuantizedEmbedding(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim):
+    def __init__(self, num_embeddings, embedding_dim, experiment=False):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.weight = nn.Parameter(torch.randn(num_embeddings, embedding_dim))
         self.eps = 1e-5
+        self.experiment = experiment
 
     def forward(self, input):
-        quantized_weight = quantize_tensor(self.weight, self.eps)
+        if self.experiment:
+            quantized_weight = quantize_tensor_1_58bit(self.weight, self.eps)
+        else:
+            quantized_weight = quantize_tensor(self.weight, self.eps)
         return nn.functional.embedding(input, quantized_weight)
 
 class BitLinear(nn.Linear):
@@ -32,22 +39,23 @@ class BitLinear(nn.Linear):
 
     def ternarize_weights_groupwise(self):
         if self.quantized_weight is None:
-            group_size = self.weight.shape[0] // self.num_groups
-            self.quantized_weight = torch.zeros_like(self.weight, dtype=torch.int8)
-
-            for g in range(self.num_groups):
-                start_idx = g * group_size
-                end_idx = (g + 1) * group_size
-                weight_group = self.weight[start_idx:end_idx]
-                self.quantized_weight[start_idx:end_idx] = quantize_tensor(weight_group, self.eps)
-
+            scale = 1.0 / self.weight.abs().mean().clamp_(min=1e-5)
+            self.quantized_weight = (self.weight * scale).round().clamp_(-1, 1) / scale
         return self.quantized_weight
 
-    def forward(self, input):
-        quantized_weight = self.ternarize_weights_groupwise()
-        dequantized_weight = quantized_weight.float() * self.weight.abs().mean()
-        output = nn.functional.linear(input, dequantized_weight, self.bias)
-        return output
+    def forward(self, x):
+        w = self.weight
+        x_float = x.to(torch.float32)  # Convert input to float32
+        x_norm = RMSNorm(x_float)
+        x_quant = activation_quant(x_norm)
+
+        # Perform quantization on a detached copy of the weights
+        w_detached = w.detach()
+        scale = 1.0 / w_detached.abs().mean().clamp_(min=1e-5)
+        w_quant = (w_detached * scale).round().clamp_(-1, 1) / scale
+        #w_quant = self.ternarize_weights_groupwise()
+        y = nn.functional.linear(x_quant, w_quant)
+        return y
 
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
@@ -83,11 +91,16 @@ class LlamaAttention(nn.Module):
         self.v_proj = BitLinear(config.hidden_size, config.hidden_size, bias=False)
         self.o_proj = BitLinear(config.hidden_size, config.hidden_size, bias=False)
         self.pretraining_tp = config.pretraining_tp
+        self.kv_cache_quant = kv_cache_quant
 
     def forward(self, hidden_states, attention_mask, cos, sin):
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+
+        # Quantize key and value states
+        key_states = self.kv_cache_quant(key_states)
+        value_states = self.kv_cache_quant(value_states)
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -110,6 +123,8 @@ class LlamaMLP(nn.Module):
         self.down_proj = BitLinear(config.intermediate_size, config.hidden_size, bias=False)
         self.up_proj = BitLinear(config.hidden_size, config.intermediate_size, bias=False)
         self.pretraining_tp = config.pretraining_tp
+        self.act_quant_8bit = act_quant_8bit
+        self.act_quant_4bit = act_quant_4bit
 
     def forward(self, hidden_states):
         if self.pretraining_tp > 1:
@@ -134,6 +149,8 @@ class LlamaMLP(nn.Module):
             )
 
             intermediate_states = (gate_proj * up_proj).split(slice, dim=2)
+            intermediate_states = [self.act_quant_8bit(state) for state in intermediate_states]  # Quantize intermediate states
+
             down_proj = [
                 F.linear(intermediate_states[i], down_proj_slices[i])
                 for i in range(self.pretraining_tp)
@@ -143,95 +160,97 @@ class LlamaMLP(nn.Module):
             gate_proj = self.gate_proj(hidden_states)
             up_proj = self.up_proj(hidden_states)
             hidden_gelu = gate_proj * up_proj
+            hidden_gelu = self.act_quant_8bit(hidden_gelu)  # Quantize hidden_gelu
             down_proj = self.down_proj(hidden_gelu)
 
+        down_proj = self.act_quant_4bit(down_proj)  # Quantize down_proj
         return down_proj
 
-class RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, x):
-        variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * x
-
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, experiment=False):
         super().__init__()
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=getattr(config, "layer_norm_eps", 1e-5))
         self.self_attn = LlamaAttention(config)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=getattr(config, "layer_norm_eps", 1e-5))
         self.mlp = LlamaMLP(config)
+        self.norm1 = nn.LayerNorm(config.hidden_size, eps=getattr(config, "layer_norm_eps", 1e-5))
+        self.norm2 = nn.LayerNorm(config.hidden_size, eps=getattr(config, "layer_norm_eps", 1e-5))
+        self.experiment = experiment
 
     def forward(self, hidden_states, attention_mask, cos, sin):
         residual = hidden_states
-
-        def attn_forward(hidden_states, attention_mask, cos, sin):
-            hidden_states = self.input_layernorm(hidden_states)
-            hidden_states = self.self_attn(hidden_states, attention_mask, cos, sin)
-            return hidden_states
-
-        hidden_states = custom_checkpoint(attn_forward, hidden_states, attention_mask, cos, sin)
-
-        if hidden_states.shape != residual.shape:
-            hidden_states = hidden_states.view(residual.shape)
-
+        hidden_states = self.self_attn(hidden_states, attention_mask, cos, sin)
+        if self.experiment:
+            self.norm1.weight = nn.Parameter(quantize_tensor_1_58bit(self.norm1.weight))
+            self.norm1.bias = nn.Parameter(quantize_tensor_1_58bit(self.norm1.bias))
+        hidden_states = self.norm1(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-
-        def mlp_forward(hidden_states):
-            hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states = self.mlp(hidden_states)
-            return hidden_states
-
-        hidden_states = custom_checkpoint(mlp_forward, hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        if self.experiment:
+            self.norm2.weight = nn.Parameter(quantize_tensor_1_58bit(self.norm2.weight))
+            self.norm2.bias = nn.Parameter(quantize_tensor_1_58bit(self.norm2.bias))
+        hidden_states = self.norm2(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
 
 class LlamaModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, experiment=False):
         super().__init__()
         self.config = config
-        self.embed_tokens = QuantizedEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.embed_tokens = QuantizedEmbedding(config.vocab_size, config.hidden_size, experiment=experiment)
+        self.layers = nn.ModuleList([LlamaDecoderLayer(config, experiment=experiment) for _ in range(config.num_hidden_layers)])
         self.norm = nn.LayerNorm(config.hidden_size, eps=getattr(config, "layer_norm_eps", 1e-5))
 
-        # Add missing bias terms
-        for layer in self.layers:
-            layer.input_layernorm.bias = nn.Parameter(torch.zeros(config.hidden_size))
-            layer.post_attention_layernorm.bias = nn.Parameter(torch.zeros(config.hidden_size))
-
         # Add lm_head
-        self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
+        #self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        print("Embedding layer weight mean:", self.embed_tokens.weight.mean())
-        print("Embedding layer weight std:", self.embed_tokens.weight.std())
-
-        for i, layer in enumerate(self.layers):
-            print(f"Layer {i} input layernorm weight mean:", layer.input_layernorm.weight.mean())
-            print(f"Layer {i} input layernorm bias mean:", layer.input_layernorm.bias.mean())
-            print(f"Layer {i} self-attention query projection weight mean:", layer.self_attn.q_proj.weight.mean())
-            print(f"Layer {i} self-attention key projection weight mean:", layer.self_attn.k_proj.weight.mean())
-            print(f"Layer {i} self-attention value projection weight mean:", layer.self_attn.v_proj.weight.mean())
-            print(f"Layer {i} self-attention output projection weight mean:", layer.self_attn.o_proj.weight.mean())
-            print(f"Layer {i} post-attention layernorm weight mean:", layer.post_attention_layernorm.weight.mean())
-            print(f"Layer {i} post-attention layernorm bias mean:", layer.post_attention_layernorm.bias.mean())
-            print(f"Layer {i} MLP gate projection weight mean:", layer.mlp.gate_proj.weight.mean())
-            print(f"Layer {i} MLP down projection weight mean:", layer.mlp.down_proj.weight.mean())
-            print(f"Layer {i} MLP up projection weight mean:", layer.mlp.up_proj.weight.mean())
-
-        print("Output layer norm weight mean:", self.norm.weight.mean())
-        print("Output layer norm bias mean:", self.norm.bias.mean())
-        print("Language model head weight mean:", self.lm_head.weight.mean())
+        # Initialize embed_positions method
+        self.embed_positions = self.create_embed_positions()
 
         # Move the model to the appropriate device
         device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         self.to(device)
+
+    def create_embed_positions(self):
+        max_seq_length = self.config.max_position_embeddings
+        hidden_size = self.config.hidden_size
+
+        def _embed_positions(position_ids):
+            batch_size, seq_length = position_ids.shape
+            position_embeddings = torch.zeros(batch_size, seq_length, hidden_size, device=position_ids.device)
+            inv_freq = 1.0 / (10000 ** (torch.arange(0, hidden_size, 2, device=position_ids.device) / hidden_size))
+            sinusoid_inp = torch.einsum("bi,j->bij", position_ids, inv_freq)
+            position_embeddings[..., 0::2] = torch.sin(sinusoid_inp)
+            position_embeddings[..., 1::2] = torch.cos(sinusoid_inp)
+            return position_embeddings
+
+        return _embed_positions
+
+    def generate(self, input_ids, attention_mask=None, generation_config=None, **kwargs):
+        # Move the input tensors to the same device as the model
+        input_ids = input_ids.to(self.lm_head.weight.device)
+
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.lm_head.weight.device)
+
+        # Generate cos and sin values
+        seq_length = input_ids.size(1)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        position_embeddings = self.embed_positions(position_ids)
+        cos = position_embeddings[:, :, 0::2].cos()
+        sin = position_embeddings[:, :, 1::2].sin()
+
+        # Generate the output sequence using the model
+        output = self.forward(input_ids, attention_mask, cos, sin, **kwargs)
+
+        # Apply the generation config to the output
+        if generation_config is not None:
+            output = generation_config.generate(output, input_ids, **kwargs)
+
+        return output
 
     @classmethod
     def load_pretrained(cls, model_path):
@@ -252,8 +271,22 @@ class LlamaModel(nn.Module):
 
         return model
 
-    def forward(self, input_ids, attention_mask, cos, sin):
+    def forward(self, input_ids, attention_mask, **kwargs):
         hidden_states = self.embed_tokens(input_ids)
+
+        # Get cos and sin values from kwargs
+        cos = kwargs.get("cos", None)
+        sin = kwargs.get("sin", None)
+
+        # Generate cos and sin values if not provided
+        if cos is None or sin is None:
+            seq_length = input_ids.size(1)
+            position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+            position_embeddings = self.embed_positions(position_ids)
+            cos = position_embeddings[..., 0::2].cos()
+            sin = position_embeddings[..., 1::2].sin()
+
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_mask, cos, sin)
         hidden_states = self.norm(hidden_states)
@@ -274,7 +307,6 @@ class LlamaModel(nn.Module):
 
         self.config.hidden_act = self.layers[0].mlp.__class__.__name__.lower()
         self.config.initializer_range = self.embed_tokens.weight.data.std().item()
-        self.config.rms_norm_eps = self.layers[0].input_layernorm.variance_epsilon
         self.config.use_cache = True
         self.config.tie_word_embeddings = False
         self.config.model_type = self.__class__.__name__.lower()
@@ -324,7 +356,6 @@ class LlamaModel(nn.Module):
             if os.path.isfile(src_path):
                 shutil.copyfile(src_path, dst_path)
 
-
         state_dict = self.state_dict()
         quantized_state_dict = {}
         total_size = 0
@@ -342,17 +373,11 @@ class LlamaModel(nn.Module):
                 else:
                     eps = 1e-5  # Default eps value for other parameters
                 quantized_param = quantize_tensor(param)
-                packed_param = pack_quantized_tensor(quantized_param)
-                quantized_state_dict[adjusted_name] = packed_param
-                quantized_size = packed_param.numel() * packed_param.element_size()
+                quantized_state_dict[adjusted_name] = quantized_param
+                quantized_size = quantized_param.numel() * quantized_param.element_size()
                 total_size += quantized_size
                 print(f"After quantization: {adjusted_name} - Size: {quantized_size} bytes")
                 weight_map["model." + name] = "model.safetensors"
-
-        # Quantize activations
-        # for name, module in self.named_modules():
-        #    if isinstance(module, BitLinear):
-        #        module.quantization_bits = quantization_bits
 
         index_data = {
             "metadata": {"total_size": total_size},
